@@ -22,3 +22,11 @@ Abre la página desde un navegador y un dispositivo compatibles con WebXR y segu
 - `jsm/webxr/`: módulos WebXR relacionados con manos, puntero, texto y controles.
 
 La página carga Three.js y los módulos `three/addons/` desde un CDN definido en el import map de `index.html`; por eso se requiere conexión a Internet al abrir la demo.
+
+## Controles de la demo
+
+- Usa el menú dentro de VR para agregar cubos, esferas y cilindros o reiniciar la torre.
+- Pellizca sobre una forma para agarrarla; mueve la mano y suelta el pellizco para lanzarla.
+- Las formas caen, chocan entre sí y pueden apilarse gracias a Cannon-es.
+
+La demo carga Three.js y Cannon-es desde sus CDN, así que necesita conexión a Internet.

@@ -2,11 +2,10 @@
 <html lang="en">
 
 <head>
-	<title>three.js vr - handinput - point and drag</title>
-	<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎲</text></svg>">
+	<title>Three.js VR - Hand Tracking Physics Sandbox</title>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-	<meta property="og:title" content="three.js vr - handinput - point and drag">
+	<meta property="og:title" content="Three.js VR - Hand Tracking Physics Sandbox">
 	<meta property="og:type" content="website">
 	<meta property="og:url" content="https://threejs.org/examples/webxr_vr_handinput_pointerdrag.html">
 	<meta property="og:image" content="https://threejs.org/examples/screenshots/webxr_vr_handinput_pointerdrag.jpg">
@@ -16,13 +15,14 @@
 <body>
 
 	<div id="info">
-		<a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> vr - handinput - point and drag<br />
+		<a href="https://threejs.org" target="_blank" rel="noopener">Three.js</a> VR - Hand Tracking Physics Sandbox<br />
 	</div>
 
 	<script type="importmap">
 	{
 		"imports": {
 			"three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+			"three/addons/webxr/VRButton.js": "./jsm/webxr/VRButton.js",
 			"three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
 		}
 	}
@@ -36,11 +36,17 @@
 		import { OculusHandModel } from 'three/addons/webxr/OculusHandModel.js';
 		import { OculusHandPointerModel } from 'three/addons/webxr/OculusHandPointerModel.js';
 		import { createText } from 'three/addons/webxr/Text2D.js';
+		import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
 
 		let camera, scene, renderer;
 		let menuMesh, instructionText;
 		let controllers, handPointers;
 		let needsCalibration = true;
+		let physicsWorld;
+		let lastFrameTime = performance.now();
+		const handMotion = new Map();
+		const stackCenter = new THREE.Vector3(0, 0, -0.7);
+		const shapeSize = 0.16;
 
 		// meshes the hand rays can intersect
 		const intersectables = [];
@@ -69,6 +75,10 @@
 
 			scene = new THREE.Scene();
 			scene.background = new THREE.Color(0x444444);
+			physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+			physicsWorld.allowSleep = true;
+			physicsWorld.defaultContactMaterial.friction = 0.65;
+			physicsWorld.defaultContactMaterial.restitution = 0.08;
 
 			camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
 			camera.position.set(0, 1.2, 0.3);
@@ -143,8 +153,11 @@
 			floor.rotation.x = - Math.PI / 2;
 			floor.receiveShadow = true;
 			scene.add(floor);
+			const floorBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane() });
+			floorBody.quaternion.setFromEuler(- Math.PI / 2, 0, 0);
+			physicsWorld.addBody(floorBody);
 
-			const menuGeometry = new THREE.PlaneGeometry(0.24, 0.5);
+			const menuGeometry = new THREE.PlaneGeometry(0.36, 0.72);
 			const menuMaterial = new THREE.MeshPhongMaterial({
 				opacity: 0,
 				transparent: true,
@@ -154,48 +167,34 @@
 			menuMesh.rotation.y = - Math.PI / 12;
 			scene.add(menuMesh);
 
-			const resetButton = makeButtonMesh(0.2, 0.1, 0.01, 0x355c7d);
-			const resetButtonText = createText('reset', 0.06);
-			resetButton.add(resetButtonText);
-			resetButtonText.position.set(0, 0, 0.0051);
-			resetButton.position.set(0, - 0.06, 0);
-			menuMesh.add(resetButton);
+			const addCubeButton = makeMenuButton('ADD CUBE', 0.27, 0x355c7d);
+			const addSphereButton = makeMenuButton('ADD SPHERE', 0.13, 0x4c956c);
+			const addCylinderButton = makeMenuButton('ADD CYLINDER', - 0.01, 0xa66c3d);
+			const resetButton = makeMenuButton('RESET', - 0.15, 0x58616f);
+			const exitButton = makeMenuButton('EXIT', - 0.29, 0xa33a3a);
 
-			const exitButton = makeButtonMesh(0.2, 0.1, 0.01, 0xff0000);
-			const exitButtonText = createText('exit', 0.06);
-			exitButton.add(exitButtonText);
-			exitButtonText.position.set(0, 0, 0.0051);
-			exitButton.position.set(0, - 0.18, 0);
-			menuMesh.add(exitButton);
-
-			instructionText = createText('This is a WebXR Hands demo, please explore with hands.', 0.04);
+			instructionText = createText('Pinch to grab and release to throw. Use the menu to add shapes.', 0.035);
 			instructionText.position.set(0, 1.6, - 0.6);
 			scene.add(instructionText);
-
-			const exitText = createText('Exiting session...', 0.04);
+			const exitText = createText('Leaving session...', 0.04);
 			exitText.position.set(0, 1.5, - 0.6);
 			exitText.visible = false;
 			scene.add(exitText);
 
-			for (let i = 0; i < 20; i++) {
-
-				const object = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.15), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-				scene.add(object);
-
-				intersectables.push(object);
-				draggables.push({ mesh: object, state: 'detached', originalParent: scene, attachedPointer: null });
-
+			for (let i = 0; i < 4; i++) {
+				createShape('cube', new THREE.Vector3(stackCenter.x, shapeSize / 2 + i * shapeSize, stackCenter.z));
 			}
 
-			randomizeObjects();
-
-			intersectables.push(menuMesh, resetButton, exitButton);
+			intersectables.push(menuMesh, addCubeButton, addSphereButton, addCylinderButton, resetButton, exitButton);
 
 			buttons.push(
+				{ mesh: addCubeButton, currState: 'none', prevState: 'none', action: () => addShape('cube') },
+				{ mesh: addSphereButton, currState: 'none', prevState: 'none', action: () => addShape('sphere') },
+				{ mesh: addCylinderButton, currState: 'none', prevState: 'none', action: () => addShape('cylinder') },
 				{
 					mesh: resetButton, currState: 'none', prevState: 'none', action: function () {
 
-						randomizeObjects();
+						resetTower();
 
 					}
 				},
@@ -217,36 +216,96 @@
 
 		}
 
+		function makeMenuButton(label, y, color) {
+
+			const button = makeButtonMesh(0.28, 0.09, 0.01, color);
+			const text = createText(label, 0.035);
+			button.add(text);
+			text.position.set(0, 0, 0.0051);
+			button.position.set(0, y, 0);
+			menuMesh.add(button);
+			return button;
+
+		}
+
+		function createShape(type, position) {
+
+			const half = shapeSize / 2;
+			let geometry, physicsShape, color;
+			if (type === 'sphere') {
+				geometry = new THREE.SphereGeometry(half, 24, 16);
+				physicsShape = new CANNON.Sphere(half);
+				color = 0x55b7a5;
+			} else if (type === 'cylinder') {
+				geometry = new THREE.CylinderGeometry(half, half, shapeSize, 20);
+				physicsShape = new CANNON.Cylinder(half, half, shapeSize, 16);
+				color = 0xe0a34c;
+			} else {
+				geometry = new THREE.BoxGeometry(shapeSize, shapeSize, shapeSize);
+				physicsShape = new CANNON.Box(new CANNON.Vec3(half, half, half));
+				color = 0x7c9be8;
+			}
+
+			const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color }));
+			mesh.castShadow = true;
+			mesh.receiveShadow = true;
+			mesh.position.copy(position);
+			scene.add(mesh);
+
+			const body = new CANNON.Body({ mass: 0.35, position: new CANNON.Vec3(position.x, position.y, position.z) });
+			if (type === 'cylinder') {
+				const localRotation = new CANNON.Quaternion();
+				localRotation.setFromEuler(Math.PI / 2, 0, 0);
+				body.addShape(physicsShape, new CANNON.Vec3(), localRotation);
+			} else {
+				body.addShape(physicsShape);
+			}
+			body.linearDamping = 0.12;
+			body.angularDamping = 0.18;
+			physicsWorld.addBody(body);
+
+			const draggable = { mesh, body, type, state: 'detached', originalParent: scene, attachedPointer: null };
+			mesh.userData.draggable = draggable;
+			intersectables.push(mesh);
+			draggables.push(draggable);
+			return draggable;
+
+		}
+
+		function addShape(type) {
+
+			const y = 1.0;
+			createShape(type, new THREE.Vector3(stackCenter.x, y, stackCenter.z));
+
+		}
+
+		function resetTower() {
+
+			draggables.forEach((draggable, index) => {
+				if (draggable.attachedPointer) draggable.attachedPointer.setAttached(false);
+				draggable.state = 'detached';
+				draggable.attachedPointer = null;
+				draggable.originalParent.add(draggable.mesh);
+				draggable.mesh.position.set(stackCenter.x, shapeSize / 2 + index * shapeSize, stackCenter.z);
+				draggable.mesh.quaternion.identity();
+				draggable.body.type = CANNON.Body.DYNAMIC;
+				draggable.body.mass = 0.35;
+				draggable.body.updateMassProperties();
+				draggable.body.position.set(draggable.mesh.position.x, draggable.mesh.position.y, draggable.mesh.position.z);
+				draggable.body.quaternion.set(0, 0, 0, 1);
+				draggable.body.velocity.set(0, 0, 0);
+				draggable.body.angularVelocity.set(0, 0, 0);
+				draggable.body.wakeUp();
+			});
+
+		}
+
 		function onWindowResize() {
 
 			camera.aspect = window.innerWidth / window.innerHeight;
 			camera.updateProjectionMatrix();
 
 			renderer.setSize(window.innerWidth, window.innerHeight);
-
-		}
-
-		function randomizeObjects() {
-
-			draggables.forEach(draggable => {
-
-				const object = draggable.mesh;
-
-				object.material.color.setHex(Math.random() * 0xffffff);
-
-				object.position.x = Math.random() * 2 - 1;
-				object.position.y = Math.random() * 2;
-				object.position.z = Math.random() * 2 - 1;
-
-				object.rotation.x = Math.random() * 2 * Math.PI;
-				object.rotation.y = Math.random() * 2 * Math.PI;
-				object.rotation.z = Math.random() * 2 * Math.PI;
-
-				object.scale.x = Math.random() + 0.5;
-				object.scale.y = Math.random() + 0.5;
-				object.scale.z = Math.random() + 0.5;
-
-			});
 
 		}
 
@@ -268,9 +327,7 @@
 
 		function updateInstructionText() {
 
-			// the instruction text is only visible as long as motion controllers are used
-
-			instructionText.visible = controllers.some(controller => controller.visible);
+			instructionText.visible = true;
 
 		}
 
@@ -284,12 +341,35 @@
 
 					case 'to-be-attached':
 						draggable.attachedPointer.children[0].attach(object);
+						draggable.body.type = CANNON.Body.KINEMATIC;
+						draggable.body.mass = 0;
+						draggable.body.updateMassProperties();
+						draggable.body.velocity.set(0, 0, 0);
+						draggable.body.angularVelocity.set(0, 0, 0);
 						draggable.state = 'attached';
 						break;
 					case 'to-be-detached':
 						draggable.originalParent.attach(object);
+						draggable.body.type = CANNON.Body.DYNAMIC;
+						draggable.body.mass = 0.35;
+						draggable.body.updateMassProperties();
+						const handVelocity = handMotion.get(draggable.attachedPointer)?.velocity || new THREE.Vector3();
+						draggable.body.velocity.set(handVelocity.x * 1.6, handVelocity.y * 1.6, handVelocity.z * 1.6);
+						draggable.body.angularVelocity.set(0, 0, 0);
+						draggable.body.wakeUp();
+						draggable.attachedPointer = null;
 						draggable.state = 'detached';
 						break;
+					case 'attached': {
+						object.scale.set(1, 1, 1);
+						object.updateWorldMatrix(true, false);
+						const worldPosition = object.getWorldPosition(new THREE.Vector3());
+						const worldQuaternion = object.getWorldQuaternion(new THREE.Quaternion());
+						draggable.body.position.set(worldPosition.x, worldPosition.y, worldPosition.z);
+						draggable.body.quaternion.set(worldQuaternion.x, worldQuaternion.y, worldQuaternion.z, worldQuaternion.w);
+						draggable.body.aabbNeedsUpdate = true;
+						break;
+					}
 					default:
 						object.scale.set(1, 1, 1);
 
@@ -300,6 +380,13 @@
 		}
 
 		function updateHandRays() {
+
+			draggables.forEach(draggable => {
+				if (draggable.state === 'attached' && !draggable.attachedPointer.isPinched()) {
+					draggable.state = 'to-be-detached';
+					draggable.attachedPointer.setAttached(false);
+				}
+			});
 
 			handPointers.forEach(hp => {
 
@@ -354,10 +441,9 @@
 
 						} else {
 
-							if (hp.isAttached() && draggable.state == 'attached') {
+							if (hp.isAttached() && draggable.state == 'attached' && draggable.attachedPointer === hp) {
 
 								draggable.state = 'to-be-detached';
-								draggable.attachedPointer = null;
 								hp.setAttached(false);
 
 							}
@@ -408,15 +494,45 @@
 
 		function animate() {
 
+			const now = performance.now();
+			const delta = Math.min((now - lastFrameTime) / 1000, 0.05);
+			lastFrameTime = now;
+
 			renderer.xr.updateCamera(camera);
+			updateHandMotion(delta);
 
 			calibrateMenu();
 			updateInstructionText();
 			updateDraggables();
 			updateHandRays();
 			updateButtons();
+			physicsWorld.step(1 / 60, delta, 3);
+			syncPhysicsMeshes();
 
 			renderer.render(scene, camera);
+
+		}
+
+		function updateHandMotion(delta) {
+
+			handPointers.forEach(pointer => {
+				const position = pointer.getWorldPosition(new THREE.Vector3());
+				const motion = handMotion.get(pointer) || { previous: position.clone(), velocity: new THREE.Vector3() };
+				if (delta > 0) motion.velocity.copy(position).sub(motion.previous).divideScalar(delta);
+				motion.velocity.clampLength(0, 5);
+				motion.previous.copy(position);
+				handMotion.set(pointer, motion);
+			});
+
+		}
+
+		function syncPhysicsMeshes() {
+
+			draggables.forEach(draggable => {
+				if (draggable.state === 'attached') return;
+				draggable.mesh.position.set(draggable.body.position.x, draggable.body.position.y, draggable.body.position.z);
+				draggable.mesh.quaternion.set(draggable.body.quaternion.x, draggable.body.quaternion.y, draggable.body.quaternion.z, draggable.body.quaternion.w);
+			});
 
 		}
 
