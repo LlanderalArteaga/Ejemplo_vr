@@ -1,542 +1,130 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
-<head>
-	<title>Three.js VR - Hand Tracking Physics Sandbox</title>
-	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-	<meta property="og:title" content="Three.js VR - Hand Tracking Physics Sandbox">
-	<meta property="og:type" content="website">
-	<meta property="og:url" content="https://threejs.org/examples/webxr_vr_handinput_pointerdrag.html">
-	<meta property="og:image" content="https://threejs.org/examples/screenshots/webxr_vr_handinput_pointerdrag.jpg">
-	<link type="text/css" rel="stylesheet" href="examples/main.css">
-</head>
-
-<body>
-
-	<div id="info">
-		<a href="https://threejs.org" target="_blank" rel="noopener">Three.js</a> VR - Hand Tracking Physics Sandbox<br />
-	</div>
-
-	<script type="importmap">
-	{
-		"imports": {
-			"three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-			"three/addons/webxr/VRButton.js": "./jsm/webxr/VRButton.js",
-			"three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-		}
-	}
-	</script>
-
-	<script type="module">
-
-		import * as THREE from 'three';
-		import { VRButton } from 'three/addons/webxr/VRButton.js';
-		import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
-		import { OculusHandModel } from 'three/addons/webxr/OculusHandModel.js';
-		import { OculusHandPointerModel } from 'three/addons/webxr/OculusHandPointerModel.js';
-		import { createText } from 'three/addons/webxr/Text2D.js';
-		import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
-
-		let camera, scene, renderer;
-		let menuMesh, instructionText;
-		let controllers, handPointers;
-		let needsCalibration = true;
-		let physicsWorld;
-		let lastFrameTime = performance.now();
-		const handMotion = new Map();
-		const stackCenter = new THREE.Vector3(0, 0, -0.7);
-		const shapeSize = 0.16;
-
-		// meshes the hand rays can intersect
-		const intersectables = [];
-
-		// button states: [none, hovered, pressed]
-		const buttons = [];
-
-		// draggable states: [detached, hovered, to-be-attached, attached, to-be-detached]
-		const draggables = [];
-
-		init();
-
-		function makeButtonMesh(x, y, z, color) {
-
-			const geometry = new THREE.BoxGeometry(x, y, z);
-			const material = new THREE.MeshPhongMaterial({ color: color });
-			const buttonMesh = new THREE.Mesh(geometry, material);
-			return buttonMesh;
-
-		}
-
-		function init() {
-
-			const container = document.createElement('div');
-			document.body.appendChild(container);
-
-			scene = new THREE.Scene();
-			scene.background = new THREE.Color(0x444444);
-			physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
-			physicsWorld.allowSleep = true;
-			physicsWorld.defaultContactMaterial.friction = 0.65;
-			physicsWorld.defaultContactMaterial.restitution = 0.08;
-
-			camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
-			camera.position.set(0, 1.2, 0.3);
-
-			scene.add(new THREE.HemisphereLight(0xcccccc, 0x999999, 3));
-
-			const light = new THREE.DirectionalLight(0xffffff, 3);
-			light.position.set(0, 6, 0);
-			light.castShadow = true;
-			light.shadow.camera.top = 2;
-			light.shadow.camera.bottom = - 2;
-			light.shadow.camera.right = 2;
-			light.shadow.camera.left = - 2;
-			light.shadow.mapSize.set(4096, 4096);
-			scene.add(light);
-
-			renderer = new THREE.WebGLRenderer({ antialias: true });
-			renderer.setPixelRatio(window.devicePixelRatio);
-			renderer.setSize(window.innerWidth, window.innerHeight);
-			renderer.setAnimationLoop(animate);
-			renderer.shadowMap.enabled = true;
-			renderer.xr.enabled = true;
-			renderer.xr.cameraAutoUpdate = false;
-
-			container.appendChild(renderer.domElement);
-
-			const sessionInit = {
-				requiredFeatures: ['hand-tracking']
-			};
-
-			document.body.appendChild(VRButton.createButton(renderer, sessionInit));
-
-			// controllers
-			const controller1 = renderer.xr.getController(0);
-			scene.add(controller1);
-
-			const controller2 = renderer.xr.getController(1);
-			scene.add(controller2);
-
-			const controllerModelFactory = new XRControllerModelFactory();
-
-			// Hand 1
-			const controllerGrip1 = renderer.xr.getControllerGrip(0);
-			controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
-			scene.add(controllerGrip1);
-
-			const hand1 = renderer.xr.getHand(0);
-			hand1.add(new OculusHandModel(hand1));
-			const handPointer1 = new OculusHandPointerModel(hand1, controller1);
-			hand1.add(handPointer1);
-
-			scene.add(hand1);
-
-			// Hand 2
-			const controllerGrip2 = renderer.xr.getControllerGrip(1);
-			controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
-			scene.add(controllerGrip2);
-
-			const hand2 = renderer.xr.getHand(1);
-			hand2.add(new OculusHandModel(hand2));
-			const handPointer2 = new OculusHandPointerModel(hand2, controller2);
-			hand2.add(handPointer2);
-			scene.add(hand2);
-
-			controllers = [controllerGrip1, controllerGrip2];
-			handPointers = [handPointer1, handPointer2];
-
-			// setup objects in scene
-			const floorGeometry = new THREE.PlaneGeometry(4, 4);
-			const floorMaterial = new THREE.MeshPhongMaterial({ color: 0x222222 });
-			const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-			floor.rotation.x = - Math.PI / 2;
-			floor.receiveShadow = true;
-			scene.add(floor);
-			const floorBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane() });
-			floorBody.quaternion.setFromEuler(- Math.PI / 2, 0, 0);
-			physicsWorld.addBody(floorBody);
-
-			const menuGeometry = new THREE.PlaneGeometry(0.36, 0.72);
-			const menuMaterial = new THREE.MeshPhongMaterial({
-				opacity: 0,
-				transparent: true,
-			});
-			menuMesh = new THREE.Mesh(menuGeometry, menuMaterial);
-			menuMesh.position.set(0.4, 1, - 1);
-			menuMesh.rotation.y = - Math.PI / 12;
-			scene.add(menuMesh);
-
-			const addCubeButton = makeMenuButton('ADD CUBE', 0.27, 0x355c7d);
-			const addSphereButton = makeMenuButton('ADD SPHERE', 0.13, 0x4c956c);
-			const addCylinderButton = makeMenuButton('ADD CYLINDER', - 0.01, 0xa66c3d);
-			const resetButton = makeMenuButton('RESET', - 0.15, 0x58616f);
-			const exitButton = makeMenuButton('EXIT', - 0.29, 0xa33a3a);
-
-			instructionText = createText('Pinch to grab and release to throw. Use the menu to add shapes.', 0.035);
-			instructionText.position.set(0, 1.6, - 0.6);
-			scene.add(instructionText);
-			const exitText = createText('Leaving session...', 0.04);
-			exitText.position.set(0, 1.5, - 0.6);
-			exitText.visible = false;
-			scene.add(exitText);
-
-			for (let i = 0; i < 4; i++) {
-				createShape('cube', new THREE.Vector3(stackCenter.x, shapeSize / 2 + i * shapeSize, stackCenter.z));
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<meta name="theme-color" content="#101820">
+		<meta name="description" content="An immersive hand-tracking laboratory for learning 3D manipulation and assembly in Meta Quest Browser.">
+		<meta property="og:title" content="Virtual Assembly Lab">
+		<meta property="og:description" content="A hand-tracked WebXR assembly activity for Meta Quest 3.">
+		<title>Virtual Assembly Lab · WebXR</title>
+		<link rel="icon" type="image/svg+xml" href="./assets/icons/favicon.svg">
+		<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/css/bootstrap.min.css" integrity="sha384-yEPZ7jP9S0QKiUQ0m3jjsO4ProIW7wvR9gXkI7JOGa2XVsw53Yke2bsdkBbjmmiX" crossorigin="anonymous">
+		<link rel="stylesheet" href="./assets/css/site.css">
+		<script type="importmap">
+		{
+			"imports": {
+				"three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+				"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
 			}
-
-			intersectables.push(menuMesh, addCubeButton, addSphereButton, addCylinderButton, resetButton, exitButton);
-
-			buttons.push(
-				{ mesh: addCubeButton, currState: 'none', prevState: 'none', action: () => addShape('cube') },
-				{ mesh: addSphereButton, currState: 'none', prevState: 'none', action: () => addShape('sphere') },
-				{ mesh: addCylinderButton, currState: 'none', prevState: 'none', action: () => addShape('cylinder') },
-				{
-					mesh: resetButton, currState: 'none', prevState: 'none', action: function () {
-
-						resetTower();
-
-					}
-				},
-				{
-					mesh: exitButton, currState: 'none', prevState: 'none', action: function () {
-
-						exitText.visible = true;
-						setTimeout(function () {
-
-							exitText.visible = false; renderer.xr.getSession().end();
-
-						}, 2000);
-
-					}
+		}
+		</script>
+		<script>
+			window.addEventListener('error', event => {
+				if (!(event.target instanceof HTMLScriptElement) || event.target.type !== 'module') return;
+				const loading = document.querySelector('#loading-state');
+				const message = document.querySelector('#browser-message');
+				const status = document.querySelector('#compatibility-status');
+				loading?.classList.add('is-hidden');
+				if (message && status) {
+					message.textContent = 'A JavaScript module could not load. Check the CDN connection and browser Console/Network panel.';
+					message.classList.remove('d-none');
+					status.textContent = 'The lab did not load completely.';
 				}
-			);
-
-			window.addEventListener('resize', onWindowResize);
-
-		}
-
-		function makeMenuButton(label, y, color) {
-
-			const button = makeButtonMesh(0.28, 0.09, 0.01, color);
-			const text = createText(label, 0.035);
-			button.add(text);
-			text.position.set(0, 0, 0.0051);
-			button.position.set(0, y, 0);
-			menuMesh.add(button);
-			return button;
-
-		}
-
-		function createShape(type, position) {
-
-			const half = shapeSize / 2;
-			let geometry, physicsShape, color;
-			if (type === 'sphere') {
-				geometry = new THREE.SphereGeometry(half, 24, 16);
-				physicsShape = new CANNON.Sphere(half);
-				color = 0x55b7a5;
-			} else if (type === 'cylinder') {
-				geometry = new THREE.CylinderGeometry(half, half, shapeSize, 20);
-				physicsShape = new CANNON.Cylinder(half, half, shapeSize, 16);
-				color = 0xe0a34c;
-			} else {
-				geometry = new THREE.BoxGeometry(shapeSize, shapeSize, shapeSize);
-				physicsShape = new CANNON.Box(new CANNON.Vec3(half, half, half));
-				color = 0x7c9be8;
-			}
-
-			const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color }));
-			mesh.castShadow = true;
-			mesh.receiveShadow = true;
-			mesh.position.copy(position);
-			scene.add(mesh);
-
-			const body = new CANNON.Body({ mass: 0.35, position: new CANNON.Vec3(position.x, position.y, position.z) });
-			if (type === 'cylinder') {
-				const localRotation = new CANNON.Quaternion();
-				localRotation.setFromEuler(Math.PI / 2, 0, 0);
-				body.addShape(physicsShape, new CANNON.Vec3(), localRotation);
-			} else {
-				body.addShape(physicsShape);
-			}
-			body.linearDamping = 0.12;
-			body.angularDamping = 0.18;
-			physicsWorld.addBody(body);
-
-			const draggable = { mesh, body, type, state: 'detached', originalParent: scene, attachedPointer: null };
-			mesh.userData.draggable = draggable;
-			intersectables.push(mesh);
-			draggables.push(draggable);
-			return draggable;
-
-		}
-
-		function addShape(type) {
-
-			const y = 1.0;
-			createShape(type, new THREE.Vector3(stackCenter.x, y, stackCenter.z));
-
-		}
-
-		function resetTower() {
-
-			draggables.forEach((draggable, index) => {
-				if (draggable.attachedPointer) draggable.attachedPointer.setAttached(false);
-				draggable.state = 'detached';
-				draggable.attachedPointer = null;
-				draggable.originalParent.add(draggable.mesh);
-				draggable.mesh.position.set(stackCenter.x, shapeSize / 2 + index * shapeSize, stackCenter.z);
-				draggable.mesh.quaternion.identity();
-				draggable.body.type = CANNON.Body.DYNAMIC;
-				draggable.body.mass = 0.35;
-				draggable.body.updateMassProperties();
-				draggable.body.position.set(draggable.mesh.position.x, draggable.mesh.position.y, draggable.mesh.position.z);
-				draggable.body.quaternion.set(0, 0, 0, 1);
-				draggable.body.velocity.set(0, 0, 0);
-				draggable.body.angularVelocity.set(0, 0, 0);
-				draggable.body.wakeUp();
-			});
-
-		}
-
-		function onWindowResize() {
-
-			camera.aspect = window.innerWidth / window.innerHeight;
-			camera.updateProjectionMatrix();
-
-			renderer.setSize(window.innerWidth, window.innerHeight);
-
-		}
-
-		function calibrateMenu() {
-
-			// position the menu relative to the camera once the session has started
-
-			if (needsCalibration && renderer.xr.getSession()) {
-
-				const xrCamera = renderer.xr.getCamera();
-				menuMesh.position.x = xrCamera.position.x + 0.4;
-				menuMesh.position.y = xrCamera.position.y;
-				menuMesh.position.z = xrCamera.position.z - 1;
-				needsCalibration = false;
-
-			}
-
-		}
-
-		function updateInstructionText() {
-
-			instructionText.visible = true;
-
-		}
-
-		function updateDraggables() {
-
-			draggables.forEach(draggable => {
-
-				const object = draggable.mesh;
-
-				switch (draggable.state) {
-
-					case 'to-be-attached':
-						draggable.attachedPointer.children[0].attach(object);
-						draggable.body.type = CANNON.Body.KINEMATIC;
-						draggable.body.mass = 0;
-						draggable.body.updateMassProperties();
-						draggable.body.velocity.set(0, 0, 0);
-						draggable.body.angularVelocity.set(0, 0, 0);
-						draggable.state = 'attached';
-						break;
-					case 'to-be-detached':
-						draggable.originalParent.attach(object);
-						draggable.body.type = CANNON.Body.DYNAMIC;
-						draggable.body.mass = 0.35;
-						draggable.body.updateMassProperties();
-						const handVelocity = handMotion.get(draggable.attachedPointer)?.velocity || new THREE.Vector3();
-						draggable.body.velocity.set(handVelocity.x * 1.6, handVelocity.y * 1.6, handVelocity.z * 1.6);
-						draggable.body.angularVelocity.set(0, 0, 0);
-						draggable.body.wakeUp();
-						draggable.attachedPointer = null;
-						draggable.state = 'detached';
-						break;
-					case 'attached': {
-						object.scale.set(1, 1, 1);
-						object.updateWorldMatrix(true, false);
-						const worldPosition = object.getWorldPosition(new THREE.Vector3());
-						const worldQuaternion = object.getWorldQuaternion(new THREE.Quaternion());
-						draggable.body.position.set(worldPosition.x, worldPosition.y, worldPosition.z);
-						draggable.body.quaternion.set(worldQuaternion.x, worldQuaternion.y, worldQuaternion.z, worldQuaternion.w);
-						draggable.body.aabbNeedsUpdate = true;
-						break;
-					}
-					default:
-						object.scale.set(1, 1, 1);
-
+			}, true);
+			window.setTimeout(() => {
+				const loading = document.querySelector('#loading-state');
+				if (loading && !loading.classList.contains('is-hidden')) {
+					loading.classList.add('is-hidden');
+					const message = document.querySelector('#browser-message');
+					message.textContent = 'The preview is taking too long to load. Check your Internet connection and the Console/Network panel.';
+					message.classList.remove('d-none');
 				}
+			}, 15000);
+		</script>
+		<script type="module" src="./src/main.js"></script>
+	</head>
+	<body>
+		<header class="site-header">
+			<nav class="container d-flex justify-content-between align-items-center py-3" aria-label="Main navigation">
+				<a class="brand-mark" href="#top" aria-label="Virtual Assembly Lab home"><span class="brand-symbol" aria-hidden="true">V</span><span>IMMERSIVE LEARNING</span></a>
+				<a class="nav-link-custom" href="#how-it-works">How it works <span aria-hidden="true">↘</span></a>
+			</nav>
+		</header>
 
-			});
+		<main id="top">
+			<section class="hero-section container py-5">
+				<div class="row align-items-center g-5">
+					<div class="col-lg-6 hero-copy">
+						<p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> WEBXR · HAND TRACKING · META QUEST 3</p>
+						<h1>Virtual Assembly<br><span>Laboratory</span></h1>
+						<p class="hero-lede">A hands-on 3D challenge. Point with a hand ray, pinch a part, and fit five distinct pieces into their matching sockets.</p>
+						<div class="entry-actions">
+							<div id="webxr-entry-slot" aria-label="Enter immersive virtual reality"></div>
+							<p id="compatibility-status" class="small-status" role="status" aria-live="polite">Checking immersive VR support…</p>
+						</div>
+						<div id="browser-message" class="alert alert-warning d-none" role="alert"></div>
+					</div>
+					<div class="col-lg-6">
+						<div class="preview-card">
+							<div class="preview-heading"><span>LAB PREVIEW</span><span class="preview-tag">DESKTOP VIEW ONLY</span></div>
+							<div id="preview-stage" class="preview-stage" aria-label="Non-interactive preview of the laboratory"></div>
+							<p class="preview-caption">The assembly challenge runs as an immersive VR session. This preview is for orientation only.</p>
+						</div>
+					</div>
+				</div>
+			</section>
 
-		}
+			<section class="container info-section pb-5" id="how-it-works">
+				<div class="row g-4">
+					<div class="col-lg-5">
+						<div class="info-card h-100">
+							<p class="section-kicker">THE CHALLENGE</p>
+							<h2>Five parts.<br>Five precise fits.</h2>
+							<p>Each piece has one matching destination. The fit is checked only when you release it. A correct placement snaps into position and locks; a mismatch leaves the challenge open for another try.</p>
+							<div class="progress-example" aria-label="Progress starts at zero out of five"><span>ASSEMBLED</span><strong>0 <i>/</i> 5</strong></div>
+						</div>
+					</div>
+					<div class="col-lg-7">
+						<div class="info-card objectives-card h-100">
+							<div class="d-flex justify-content-between align-items-start gap-3">
+								<div><p class="section-kicker">ASSEMBLY SET</p><h2>Know each shape</h2></div>
+								<span class="objective-count">01—05</span>
+							</div>
+							<ul class="objective-list">
+								<li><span class="shape-chip chip-cube" aria-hidden="true"></span><span>Cube</span><span class="shape-id">A</span></li>
+								<li><span class="shape-chip chip-sphere" aria-hidden="true"></span><span>Sphere</span><span class="shape-id">B</span></li>
+								<li><span class="shape-chip chip-cone" aria-hidden="true"></span><span>Cone</span><span class="shape-id">C</span></li>
+								<li><span class="shape-chip chip-cylinder" aria-hidden="true"></span><span>Cylinder</span><span class="shape-id">D</span></li>
+								<li><span class="shape-chip chip-prism" aria-hidden="true"></span><span>Triangular prism</span><span class="shape-id">E</span></li>
+							</ul>
+						</div>
+					</div>
+				</div>
+			</section>
 
-		function updateHandRays() {
+			<section class="container pb-5 requirements-section">
+				<div class="row g-4 align-items-stretch">
+					<div class="col-md-4"><div class="requirement-item"><span class="requirement-index">01</span><div><h3>Enter VR</h3><p>Use Meta Quest Browser and allow the immersive session.</p></div></div></div>
+					<div class="col-md-4"><div class="requirement-item"><span class="requirement-index">02</span><div><h3>Show both hands</h3><p>Enable hand tracking in Quest settings. Physical controllers are not used by the activity.</p></div></div></div>
+					<div class="col-md-4"><div class="requirement-item"><span class="requirement-index">03</span><div><h3>Pinch and place</h3><p>Point at a part, pinch to hold it, then release near its labeled socket.</p></div></div></div>
+				</div>
+			</section>
 
-			draggables.forEach(draggable => {
-				if (draggable.state === 'attached' && !draggable.attachedPointer.isPinched()) {
-					draggable.state = 'to-be-detached';
-					draggable.attachedPointer.setAttached(false);
-				}
-			});
+			<section class="container pb-5">
+				<div class="system-note d-flex flex-column flex-md-row justify-content-between gap-3">
+					<div><p class="section-kicker">REQUIREMENTS</p><h2>Designed for immersive VR</h2></div>
+					<p>Meta Quest 3 with Meta Quest Browser, hand tracking enabled, and an HTTPS connection. A desktop browser can show the preview, but cannot verify real hand input.</p>
+				</div>
+			</section>
+		</main>
 
-			handPointers.forEach(hp => {
-
-				let distance = null;
-				let intersectingMesh = null;
-				intersectables.forEach(object => {
-
-					const intersections = hp.intersectObject(object, false);
-					if (intersections && intersections.length > 0) {
-
-						if (distance == null || intersections[0].distance < distance) {
-
-							distance = intersections[0].distance;
-							intersectingMesh = object;
-
-						}
-
-					}
-
-				});
-				if (distance) {
-
-					hp.setCursor(distance);
-					const button = buttons.find(button => button.mesh === intersectingMesh);
-					if (button !== undefined) {
-
-						if (hp.isPinched()) {
-
-							button.currState = 'pressed';
-
-						} else if (button.currState != 'pressed') {
-
-							button.currState = 'hovered';
-
-						}
-
-					}
-
-					const draggable = draggables.find(draggable => draggable.mesh === intersectingMesh);
-					if (draggable !== undefined) {
-
-						intersectingMesh.scale.set(1.1, 1.1, 1.1);
-						if (hp.isPinched()) {
-
-							if (!hp.isAttached() && draggable.state != 'attached') {
-
-								draggable.state = 'to-be-attached';
-								draggable.attachedPointer = hp;
-								hp.setAttached(true);
-
-							}
-
-						} else {
-
-							if (hp.isAttached() && draggable.state == 'attached' && draggable.attachedPointer === hp) {
-
-								draggable.state = 'to-be-detached';
-								hp.setAttached(false);
-
-							}
-
-						}
-
-					}
-
-				} else {
-
-					hp.setCursor(1.5);
-
-				}
-
-			});
-
-		}
-
-		function updateButtons() {
-
-			buttons.forEach(button => {
-
-				if (button.currState == 'none') {
-
-					button.mesh.scale.set(1, 1, 1);
-
-				} else {
-
-					button.mesh.scale.set(1.1, 1.1, 1.1);
-
-				}
-
-				if (button.currState == 'pressed' && button.prevState != 'pressed') {
-
-					button.action();
-
-				}
-
-				// preserve prevState, clear currState
-				// updateHandRays() will update currState
-
-				button.prevState = button.currState;
-				button.currState = 'none';
-
-			});
-
-		}
-
-		function animate() {
-
-			const now = performance.now();
-			const delta = Math.min((now - lastFrameTime) / 1000, 0.05);
-			lastFrameTime = now;
-
-			renderer.xr.updateCamera(camera);
-			updateHandMotion(delta);
-
-			calibrateMenu();
-			updateInstructionText();
-			updateDraggables();
-			updateHandRays();
-			updateButtons();
-			physicsWorld.step(1 / 60, delta, 3);
-			syncPhysicsMeshes();
-
-			renderer.render(scene, camera);
-
-		}
-
-		function updateHandMotion(delta) {
-
-			handPointers.forEach(pointer => {
-				const position = pointer.getWorldPosition(new THREE.Vector3());
-				const motion = handMotion.get(pointer) || { previous: position.clone(), velocity: new THREE.Vector3() };
-				if (delta > 0) motion.velocity.copy(position).sub(motion.previous).divideScalar(delta);
-				motion.velocity.clampLength(0, 5);
-				motion.previous.copy(position);
-				handMotion.set(pointer, motion);
-			});
-
-		}
-
-		function syncPhysicsMeshes() {
-
-			draggables.forEach(draggable => {
-				if (draggable.state === 'attached') return;
-				draggable.mesh.position.set(draggable.body.position.x, draggable.body.position.y, draggable.body.position.z);
-				draggable.mesh.quaternion.set(draggable.body.quaternion.x, draggable.body.quaternion.y, draggable.body.quaternion.z, draggable.body.quaternion.w);
-			});
-
-		}
-
-	</script>
-</body>
-
+		<footer class="site-footer">
+			<div class="container d-flex flex-column flex-md-row justify-content-between gap-2 py-4">
+				<p class="mb-0">VIRTUAL ASSEMBLY LAB <span>·</span> UNIVERSITY PRACTICE</p>
+				<p class="mb-0">Built with Three.js, WebXR and Bootstrap 5 · Student project</p>
+			</div>
+		</footer>
+		<div id="loading-state" class="loading-state" role="status" aria-live="polite"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Loading the 3D preview…</span></div>
+	</body>
 </html>

@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>Three.js VR - Hand Tracking Physics Sandbox</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+	<meta property="og:title" content="Three.js VR - Hand Tracking Physics Sandbox">
+	<meta property="og:type" content="website">
+	<meta property="og:url" content="https://threejs.org/examples/webxr_vr_handinput_pointerdrag.html">
+	<meta property="og:image" content="https://threejs.org/examples/screenshots/webxr_vr_handinput_pointerdrag.jpg">
+	<link type="text/css" rel="stylesheet" href="main.css">
+</head>
+
+<body>
+
+	<div id="info">
+		<a href="https://threejs.org" target="_blank" rel="noopener">Three.js</a> VR - Hand Tracking Physics Sandbox<br />
+	</div>
+
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+			"three/addons/webxr/VRButton.js": "./jsm/webxr/VRButton.js",
+			"three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+		}
+	}
+	</script>
+
+	<script type="module">
+
+		import * as THREE from 'three';
+		import { VRButton } from 'three/addons/webxr/VRButton.js';
+		import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+		import { OculusHandModel } from 'three/addons/webxr/OculusHandModel.js';
+		import { OculusHandPointerModel } from 'three/addons/webxr/OculusHandPointerModel.js';
+		import { createText } from 'three/addons/webxr/Text2D.js';
+		import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+
+		let camera, scene, renderer;
+		let menuMesh, instructionText;
+		let controllers, handPointers;
+		let needsCalibration = true;
+		let physicsWorld;
+		let lastFrameTime = performance.now();
+		const handMotion = new Map();
+		const stackCenter = new THREE.Vector3(0, 0, -0.7);
+		const shapeSize = 0.16;
+
+		// meshes the hand rays can intersect
+		const intersectables = [];
+
+		// button states: [none, hovered, pressed]
+		const buttons = [];
+
+		// draggable states: [detached, hovered, to-be-attached, attached, to-be-detached]
+		const draggables = [];
+
+		init();
+
+		function makeButtonMesh(x, y, z, color) {
+
+			const geometry = new THREE.BoxGeometry(x, y, z);
+			const material = new THREE.MeshPhongMaterial({ color: color });
+			const buttonMesh = new THREE.Mesh(geometry, material);
+			return buttonMesh;
+
+		}
+
+		function init() {
+
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+
+			scene = new THREE.Scene();
+			scene.background = new THREE.Color(0x444444);
+			physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+			physicsWorld.allowSleep = true;
+			physicsWorld.defaultContactMaterial.friction = 0.65;
+			physicsWorld.defaultContactMaterial.restitution = 0.08;
+
+			camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
+			camera.position.set(0, 1.2, 0.3);
+
+			scene.add(new THREE.HemisphereLight(0xcccccc, 0x999999, 3));
+
+			const light = new THREE.DirectionalLight(0xffffff, 3);
+			light.position.set(0, 6, 0);
+			light.castShadow = true;
+			light.shadow.camera.top = 2;
+			light.shadow.camera.bottom = - 2;
+			light.shadow.camera.right = 2;
+			light.shadow.camera.left = - 2;
+			light.shadow.mapSize.set(4096, 4096);
+			scene.add(light);
+
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+			renderer.setPixelRatio(window.devicePixelRatio);
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			renderer.setAnimationLoop(animate);
+			renderer.shadowMap.enabled = true;
+			renderer.xr.enabled = true;
+			renderer.xr.cameraAutoUpdate = false;
+			renderer.xr.addEventListener('sessionstart', () => {
+				needsCalibration = true;
+			});
+			renderer.xr.addEventListener('sessionend', () => {
+				needsCalibration = true;
+			});
+
+			container.appendChild(renderer.domElement);
+
+			const sessionInit = {
+				requiredFeatures: ['hand-tracking']
+			};
+
+			document.body.appendChild(VRButton.createButton(renderer, sessionInit));
+
+			// controllers
+			const controller1 = renderer.xr.getController(0);
+			scene.add(controller1);
+
+			const controller2 = renderer.xr.getController(1);
+			scene.add(controller2);
+
+			const controllerModelFactory = new XRControllerModelFactory();
+
+			// Hand 1
+			const controllerGrip1 = renderer.xr.getControllerGrip(0);
+			controllerGrip1.add(controllerModelFactory.createControllerModel(controllerGrip1));
+			scene.add(controllerGrip1);
+
+			const hand1 = renderer.xr.getHand(0);
+			hand1.add(new OculusHandModel(hand1));
+			const handPointer1 = new OculusHandPointerModel(hand1, controller1);
+			hand1.add(handPointer1);
+
+			scene.add(hand1);
+
+			// Hand 2
+			const controllerGrip2 = renderer.xr.getControllerGrip(1);
+			controllerGrip2.add(controllerModelFactory.createControllerModel(controllerGrip2));
+			scene.add(controllerGrip2);
+
+			const hand2 = renderer.xr.getHand(1);
+			hand2.add(new OculusHandModel(hand2));
+			const handPointer2 = new OculusHandPointerModel(hand2, controller2);
+			hand2.add(handPointer2);
+			scene.add(hand2);
+
+			controllers = [controllerGrip1, controllerGrip2];
+			handPointers = [handPointer1, handPointer2];
+
+			// setup objects in scene
+			const floorGeometry = new THREE.PlaneGeometry(4, 4);
+			const floorMaterial = new THREE.MeshPhongMaterial({ color: 0x222222 });
+			const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+			floor.rotation.x = - Math.PI / 2;
+			floor.receiveShadow = true;
+			scene.add(floor);
+			const floorBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane() });
+			floorBody.quaternion.setFromEuler(- Math.PI / 2, 0, 0);
+			physicsWorld.addBody(floorBody);
+
+			const menuGeometry = new THREE.PlaneGeometry(0.42, 0.82);
+			const menuMaterial = new THREE.MeshPhongMaterial({
+				color: 0x101b2e,
+				opacity: 0.92,
+				transparent: true,
+				depthWrite: false,
+			});
+			menuMesh = new THREE.Mesh(menuGeometry, menuMaterial);
+			scene.add(menuMesh);
+
+			const addCubeButton = makeMenuButton('ADD CUBE', 0.32, 0x355c7d);
+			const addSphereButton = makeMenuButton('ADD SPHERE', 0.16, 0x4c956c);
+			const addCylinderButton = makeMenuButton('ADD CYLINDER', 0, 0xa66c3d);
+			const resetButton = makeMenuButton('RESET', - 0.16, 0x58616f);
+			const exitButton = makeMenuButton('EXIT', - 0.32, 0xa33a3a);
+
+			instructionText = createText('Pinch to grab and release to throw. Use the menu to add shapes.', 0.035);
+			instructionText.position.set(0, 1.6, - 0.6);
+			scene.add(instructionText);
+			const exitText = createText('Leaving session...', 0.04);
+			exitText.position.set(0, 1.5, - 0.6);
+			exitText.visible = false;
+			scene.add(exitText);
+
+			for (let i = 0; i < 4; i++) {
+				createShape('cube', new THREE.Vector3(stackCenter.x, shapeSize / 2 + i * shapeSize, stackCenter.z));
+			}
+
+			intersectables.push(menuMesh, addCubeButton, addSphereButton, addCylinderButton, resetButton, exitButton);
+
+			buttons.push(
+				{ mesh: addCubeButton, currState: 'none', prevState: 'none', action: () => addShape('cube') },
+				{ mesh: addSphereButton, currState: 'none', prevState: 'none', action: () => addShape('sphere') },
+				{ mesh: addCylinderButton, currState: 'none', prevState: 'none', action: () => addShape('cylinder') },
+				{
+					mesh: resetButton, currState: 'none', prevState: 'none', action: function () {
+
+						resetTower();
+
+					}
+				},
+				{
+					mesh: exitButton, currState: 'none', prevState: 'none', action: function () {
+
+						exitText.visible = true;
+						setTimeout(function () {
+
+							exitText.visible = false; renderer.xr.getSession().end();
+
+						}, 2000);
+
+					}
+				}
+			);
+
+			window.addEventListener('resize', onWindowResize);
+
+		}
+
+		function makeMenuButton(label, y, color) {
+
+			const button = makeButtonMesh(0.34, 0.11, 0.015, color);
+			const text = createText(label, 0.04);
+			button.add(text);
+			text.position.set(0, 0, 0.0051);
+			button.position.set(0, y, 0);
+			menuMesh.add(button);
+			return button;
+
+		}
+
+		function createShape(type, position) {
+
+			const half = shapeSize / 2;
+			let geometry, physicsShape, color;
+			if (type === 'sphere') {
+				geometry = new THREE.SphereGeometry(half, 24, 16);
+				physicsShape = new CANNON.Sphere(half);
+				color = 0x55b7a5;
+			} else if (type === 'cylinder') {
+				geometry = new THREE.CylinderGeometry(half, half, shapeSize, 20);
+				physicsShape = new CANNON.Cylinder(half, half, shapeSize, 16);
+				color = 0xe0a34c;
+			} else {
+				geometry = new THREE.BoxGeometry(shapeSize, shapeSize, shapeSize);
+				physicsShape = new CANNON.Box(new CANNON.Vec3(half, half, half));
+				color = 0x7c9be8;
+			}
+
+			const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color }));
+			mesh.castShadow = true;
+			mesh.receiveShadow = true;
+			mesh.position.copy(position);
+			scene.add(mesh);
+
+			const body = new CANNON.Body({ mass: 0.35, position: new CANNON.Vec3(position.x, position.y, position.z) });
+			if (type === 'cylinder') {
+				const localRotation = new CANNON.Quaternion();
+				localRotation.setFromEuler(Math.PI / 2, 0, 0);
+				body.addShape(physicsShape, new CANNON.Vec3(), localRotation);
+			} else {
+				body.addShape(physicsShape);
+			}
+			body.linearDamping = 0.12;
+			body.angularDamping = 0.18;
+			physicsWorld.addBody(body);
+
+			const draggable = { mesh, body, type, state: 'detached', originalParent: scene, attachedPointer: null };
+			mesh.userData.draggable = draggable;
+			intersectables.push(mesh);
+			draggables.push(draggable);
+			return draggable;
+
+		}
+
+		function addShape(type) {
+
+			const y = 1.0;
+			createShape(type, new THREE.Vector3(stackCenter.x, y, stackCenter.z));
+
+		}
+
+		function resetTower() {
+
+			draggables.forEach((draggable, index) => {
+				if (draggable.attachedPointer) draggable.attachedPointer.setAttached(false);
+				draggable.state = 'detached';
+				draggable.attachedPointer = null;
+				draggable.originalParent.add(draggable.mesh);
+				draggable.mesh.position.set(stackCenter.x, shapeSize / 2 + index * shapeSize, stackCenter.z);
+				draggable.mesh.quaternion.identity();
+				draggable.body.type = CANNON.Body.DYNAMIC;
+				draggable.body.mass = 0.35;
+				draggable.body.updateMassProperties();
+				draggable.body.position.set(draggable.mesh.position.x, draggable.mesh.position.y, draggable.mesh.position.z);
+				draggable.body.quaternion.set(0, 0, 0, 1);
+				draggable.body.velocity.set(0, 0, 0);
+				draggable.body.angularVelocity.set(0, 0, 0);
+				draggable.body.wakeUp();
+			});
+
+		}
+
+		function onWindowResize() {
+
+			camera.aspect = window.innerWidth / window.innerHeight;
+			camera.updateProjectionMatrix();
+
+			renderer.setSize(window.innerWidth, window.innerHeight);
+
+		}
+
+		function calibrateMenu() {
+
+			// position the menu relative to the camera once the session has started
+
+			if (needsCalibration && renderer.xr.getSession()) {
+
+				const xrCamera = renderer.xr.getCamera();
+				const cameraPosition = xrCamera.getWorldPosition(new THREE.Vector3());
+				const forward = xrCamera.getWorldDirection(new THREE.Vector3());
+				forward.y = 0;
+				forward.normalize();
+				menuMesh.position.copy(cameraPosition).addScaledVector(forward, 0.85);
+				menuMesh.position.y = cameraPosition.y - 0.12;
+				menuMesh.lookAt(cameraPosition.x, menuMesh.position.y, cameraPosition.z);
+				needsCalibration = false;
+
+			}
+
+		}
+
+		function updateInstructionText() {
+
+			instructionText.visible = true;
+
+		}
+
+		function updateDraggables() {
+
+			draggables.forEach(draggable => {
+
+				const object = draggable.mesh;
+
+				switch (draggable.state) {
+
+					case 'to-be-attached':
+						draggable.attachedPointer.children[0].attach(object);
+						draggable.body.type = CANNON.Body.KINEMATIC;
+						draggable.body.mass = 0;
+						draggable.body.updateMassProperties();
+						draggable.body.velocity.set(0, 0, 0);
+						draggable.body.angularVelocity.set(0, 0, 0);
+						draggable.state = 'attached';
+						break;
+					case 'to-be-detached':
+						draggable.originalParent.attach(object);
+						draggable.body.type = CANNON.Body.DYNAMIC;
+						draggable.body.mass = 0.35;
+						draggable.body.updateMassProperties();
+						const handVelocity = handMotion.get(draggable.attachedPointer)?.velocity || new THREE.Vector3();
+						draggable.body.velocity.set(handVelocity.x * 1.6, handVelocity.y * 1.6, handVelocity.z * 1.6);
+						draggable.body.angularVelocity.set(0, 0, 0);
+						draggable.body.wakeUp();
+						draggable.attachedPointer = null;
+						draggable.state = 'detached';
+						break;
+					case 'attached': {
+						object.scale.set(1, 1, 1);
+						object.updateWorldMatrix(true, false);
+						const worldPosition = object.getWorldPosition(new THREE.Vector3());
+						const worldQuaternion = object.getWorldQuaternion(new THREE.Quaternion());
+						draggable.body.position.set(worldPosition.x, worldPosition.y, worldPosition.z);
+						draggable.body.quaternion.set(worldQuaternion.x, worldQuaternion.y, worldQuaternion.z, worldQuaternion.w);
+						draggable.body.aabbNeedsUpdate = true;
+						break;
+					}
+					default:
+						object.scale.set(1, 1, 1);
+
+				}
+
+			});
+
+		}
+
+		function updateHandRays() {
+
+			draggables.forEach(draggable => {
+				if (draggable.state === 'attached' && !draggable.attachedPointer.isPinched()) {
+					draggable.state = 'to-be-detached';
+					draggable.attachedPointer.setAttached(false);
+				}
+			});
+
+			handPointers.forEach(hp => {
+
+				let distance = null;
+				let intersectingMesh = null;
+				intersectables.forEach(object => {
+
+					const intersections = hp.intersectObject(object, false);
+					if (intersections && intersections.length > 0) {
+
+						if (distance == null || intersections[0].distance < distance) {
+
+							distance = intersections[0].distance;
+							intersectingMesh = object;
+
+						}
+
+					}
+
+				});
+				if (distance) {
+
+					hp.setCursor(distance);
+					const button = buttons.find(button => button.mesh === intersectingMesh);
+					if (button !== undefined) {
+
+						if (hp.isPinched()) {
+
+							button.currState = 'pressed';
+
+						} else if (button.currState != 'pressed') {
+
+							button.currState = 'hovered';
+
+						}
+
+					}
+
+					const draggable = draggables.find(draggable => draggable.mesh === intersectingMesh);
+					if (draggable !== undefined) {
+
+						intersectingMesh.scale.set(1.1, 1.1, 1.1);
+						if (hp.isPinched()) {
+
+							if (!hp.isAttached() && draggable.state != 'attached') {
+
+								draggable.state = 'to-be-attached';
+								draggable.attachedPointer = hp;
+								hp.setAttached(true);
+
+							}
+
+						} else {
+
+							if (hp.isAttached() && draggable.state == 'attached' && draggable.attachedPointer === hp) {
+
+								draggable.state = 'to-be-detached';
+								hp.setAttached(false);
+
+							}
+
+						}
+
+					}
+
+				} else {
+
+					hp.setCursor(1.5);
+
+				}
+
+			});
+
+		}
+
+		function updateButtons() {
+
+			buttons.forEach(button => {
+
+				if (button.currState == 'none') {
+
+					button.mesh.scale.set(1, 1, 1);
+
+				} else {
+
+					button.mesh.scale.set(1.1, 1.1, 1.1);
+
+				}
+
+				if (button.currState == 'pressed' && button.prevState != 'pressed') {
+
+					button.action();
+
+				}
+
+				// preserve prevState, clear currState
+				// updateHandRays() will update currState
+
+				button.prevState = button.currState;
+				button.currState = 'none';
+
+			});
+
+		}
+
+		function animate() {
+
+			const now = performance.now();
+			const delta = Math.min((now - lastFrameTime) / 1000, 0.05);
+			lastFrameTime = now;
+
+			renderer.xr.updateCamera(camera);
+			updateHandMotion(delta);
+
+			calibrateMenu();
+			updateInstructionText();
+			updateDraggables();
+			updateHandRays();
+			updateButtons();
+			physicsWorld.step(1 / 60, delta, 3);
+			syncPhysicsMeshes();
+
+			renderer.render(scene, camera);
+
+		}
+
+		function updateHandMotion(delta) {
+
+			handPointers.forEach(pointer => {
+				const position = pointer.getWorldPosition(new THREE.Vector3());
+				const motion = handMotion.get(pointer) || { previous: position.clone(), velocity: new THREE.Vector3() };
+				if (delta > 0) motion.velocity.copy(position).sub(motion.previous).divideScalar(delta);
+				motion.velocity.clampLength(0, 5);
+				motion.previous.copy(position);
+				handMotion.set(pointer, motion);
+			});
+
+		}
+
+		function syncPhysicsMeshes() {
+
+			draggables.forEach(draggable => {
+				if (draggable.state === 'attached') return;
+				draggable.mesh.position.set(draggable.body.position.x, draggable.body.position.y, draggable.body.position.z);
+				draggable.mesh.quaternion.set(draggable.body.quaternion.x, draggable.body.quaternion.y, draggable.body.quaternion.z, draggable.body.quaternion.w);
+			});
+
+		}
+
+	</script>
+</body>
+
+</html>
